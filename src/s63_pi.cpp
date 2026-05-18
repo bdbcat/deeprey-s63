@@ -43,6 +43,7 @@
 
 #include "s63_pi.h"
 #include "s63chart.h"
+#include "DpS63API.h"
 #include "src/myiso8211/iso8211.h"
 #include "dsa_utils.h"
 #include "json_defs.h"
@@ -357,7 +358,7 @@ s63_pi::s63_pi(void *ppimgr)
       // Create the PlugIn icons
       m_pplugin_icon = new wxBitmap(default_pi);
 
-      wxString dataLocn = GetPluginDataDir("s63_pi") + wxFileName::GetPathSeparator()
+      wxString dataLocn = GetPluginDataDir("deeprey-s63_pi") + wxFileName::GetPathSeparator()
                           + _T("data") + wxFileName::GetPathSeparator();
 
       wxImage panelIcon(  dataLocn + _T("s63_panel_icon.png"));
@@ -383,14 +384,19 @@ s63_pi::s63_pi(void *ppimgr)
 
 
 #ifdef __WXMSW__
-      //g_sencutil_bin = _T("\"") + fn_exe.GetPath( wxPATH_GET_VOLUME | wxPATH_GET_SEPARATOR) +  _T("plugins\\s63_pi\\OCPNsenc.exe\"");
-      g_sencutil_bin = GetPluginDataDir("s63_pi") + _T("\\OCPNsenc.exe");
-
+      g_sencutil_bin = GetPluginDataDir("deeprey-s63_pi") + _T("\\data\\OCPNsenc.exe");
 #endif
 
 #ifdef __WXOSX__
 //      fn_exe.RemoveLastDir();
 //      g_sencutil_bin = _T("\"") + fn_exe.GetPath( wxPATH_GET_VOLUME | wxPATH_GET_SEPARATOR) +  _T("PlugIns/s63_pi/OCPNsenc\"");
+#endif
+
+#ifdef __WXGTK__
+      //  OCPNsenc is installed alongside the plugin data files.
+      g_sencutil_bin = GetPluginDataDir("deeprey-s63_pi")
+                       + wxFileName::GetPathSeparator() + _T("data")
+                       + wxFileName::GetPathSeparator() + _T("OCPNsenc");
 #endif
 
       if (!wxFileExists(g_sencutil_bin)) {
@@ -503,6 +509,11 @@ int s63_pi::Init(void)
 
     g_benable_screenlog = g_buser_enable_screenlog;
 
+    //  Deeprey integration: create the API object and publish its pointer so
+    //  deeprey-gui can drive S63 chart management from its settings UI.
+    m_s63API = new DpS63::DpS63API(this);
+    UpdateApiPtr();
+
     return (INSTALLS_PLUGIN_CHART_GL | INSTALLS_TOOLBOX_PAGE | WANTS_PLUGIN_MESSAGING
             | WANTS_OVERLAY_CALLBACK | WANTS_OPENGL_OVERLAY_CALLBACK  );
 
@@ -519,7 +530,21 @@ bool s63_pi::DeInit(void)
 
     DeleteOptionsPage( m_s63chartPanelWinTop );
 
+    //  Deeprey integration: tear down the API and broadcast a null pointer so
+    //  deeprey-gui clears g_s63API and falls back to its mock.
+    delete m_s63API;
+    m_s63API = nullptr;
+    UpdateApiPtr();
+
     return true;
+}
+
+//  Publish the current DpS63API pointer (or "0" during DeInit) to deeprey-gui.
+void s63_pi::UpdateApiPtr()
+{
+    wxString apiPtrStr =
+        wxString::Format(_T("%llu"), (unsigned long long)m_s63API);
+    SendPluginMessage(_T("S63_API_TO_DP_GUI"), apiPtrStr);
 }
 
 int s63_pi::GetAPIVersionMajor()
@@ -576,6 +601,12 @@ void s63_pi::SetPluginMessage(wxString &message_id, wxString &message_body)
 {
     if(message_id == _T("S63_CALLBACK_PRIVATE_1") ){
         ImportCells();
+    }
+
+    //  deeprey-gui announces itself on startup; (re)publish our API pointer
+    //  so it can be received regardless of plugin load order.
+    else if(message_id == _T("DP_GUI_TO_S63")){
+        UpdateApiPtr();
     }
 
 
@@ -1020,60 +1051,88 @@ int s63_pi::ImportCells( void )
     //  Get the ENC_ROOT directory
     wxString enc_root_dir;
 
-    wxDirDialog *DiropenDialog = new wxDirDialog( NULL, _("Select S63 exchange set root directory (usually ENC_ROOT)"),
-                                                  m_last_enc_root_dir);
+    bool bSENC = true;
+    wxString msg;                       // reused for status messages below
 
-    while(!enc_root_dir.Length()){
-        int dirresponse = DiropenDialog->ShowModal();
-
-        if( dirresponse == wxID_OK ){
-            wxString potential_root_dir = DiropenDialog->GetPath();
-            if(potential_root_dir.EndsWith(_T("ENC_ROOT"))){
-                enc_root_dir = potential_root_dir;
-            }
-            else{
-                wxDir top_dir(potential_root_dir);
-                if(top_dir.HasSubDirs()){
-                    wxString file;
-                    bool bn = top_dir.GetFirst(&file, wxEmptyString);
-                    while((file != _T("ENC_ROOT") && bn)){
-                        bn = top_dir.GetNext(&file);
-                    }
-
-                    if(file == _T("ENC_ROOT")){
-                        enc_root_dir = potential_root_dir + wxFileName::GetPathSeparator() + file;
-                    }
-                }
-            }
-            if(!enc_root_dir.Length()){
-                wxString msg = _("Cannot find \"ENC_ROOT\" directory");
-
-                int dret = OCPNMessageBox_PlugIn(NULL, msg, _("s63_pi Message"),  wxCANCEL | wxOK, -1, -1);
-                if(dret == wxID_CANCEL){
-                    return 0;
-                }
-            }
-
+    if( !m_apiEncRootOverride.IsEmpty() ){
+        //  Driven by DpS63API: the ENC_ROOT path is supplied directly. Locate
+        //  ENC_ROOT under it if the override is a parent directory, and build
+        //  eSENCs on import (the useful headless default).
+        wxString potential_root_dir = m_apiEncRootOverride;
+        if(potential_root_dir.EndsWith(_T("ENC_ROOT"))){
+            enc_root_dir = potential_root_dir;
         }
-        else {
+        else{
+            wxDir top_dir(potential_root_dir);
+            if(top_dir.HasSubDirs()){
+                wxString file;
+                bool bn = top_dir.GetFirst(&file, wxEmptyString);
+                while((file != _T("ENC_ROOT") && bn)){
+                    bn = top_dir.GetNext(&file);
+                }
+                if(file == _T("ENC_ROOT")){
+                    enc_root_dir = potential_root_dir + wxFileName::GetPathSeparator() + file;
+                }
+            }
+        }
+        if( !enc_root_dir.Len() )
+            return 0;
+    }
+    else {
+        wxDirDialog *DiropenDialog = new wxDirDialog( NULL, _("Select S63 exchange set root directory (usually ENC_ROOT)"),
+                                                      m_last_enc_root_dir);
+
+        while(!enc_root_dir.Length()){
+            int dirresponse = DiropenDialog->ShowModal();
+
+            if( dirresponse == wxID_OK ){
+                wxString potential_root_dir = DiropenDialog->GetPath();
+                if(potential_root_dir.EndsWith(_T("ENC_ROOT"))){
+                    enc_root_dir = potential_root_dir;
+                }
+                else{
+                    wxDir top_dir(potential_root_dir);
+                    if(top_dir.HasSubDirs()){
+                        wxString file;
+                        bool bn = top_dir.GetFirst(&file, wxEmptyString);
+                        while((file != _T("ENC_ROOT") && bn)){
+                            bn = top_dir.GetNext(&file);
+                        }
+
+                        if(file == _T("ENC_ROOT")){
+                            enc_root_dir = potential_root_dir + wxFileName::GetPathSeparator() + file;
+                        }
+                    }
+                }
+                if(!enc_root_dir.Length()){
+                    wxString msg = _("Cannot find \"ENC_ROOT\" directory");
+
+                    int dret = OCPNMessageBox_PlugIn(NULL, msg, _("s63_pi Message"),  wxCANCEL | wxOK, -1, -1);
+                    if(dret == wxID_CANCEL){
+                        return 0;
+                    }
+                }
+
+            }
+            else {
+                return 0;
+            }
+        }
+
+        if( !enc_root_dir.Len() ){
             return 0;
         }
-    }
 
-    if( !enc_root_dir.Len() ){
-        return 0;
+        msg = _("OpenCPN can create eSENC files as cells are imported.\n\nNote:\nThis process may take some time.\neSENCS not processed here will be created as needed by OpenCPN.\n\nCreate eSENCs on Import?\n");
+
+        int dret = OCPNMessageBox_PlugIn(NULL, msg, _("s63_pi Message"),  wxYES_NO, -1, -1);
+        bSENC = (dret == wxID_YES);
     }
 
     m_last_enc_root_dir = enc_root_dir;
     SaveConfig();
 
-    wxString msg = _("OpenCPN can create eSENC files as cells are imported.\n\nNote:\nThis process may take some time.\neSENCS not processed here will be created as needed by OpenCPN.\n\nCreate eSENCs on Import?\n");
-
-    int dret = OCPNMessageBox_PlugIn(NULL, msg, _("s63_pi Message"),  wxYES_NO, -1, -1);
-    bool bSENC = (dret == wxID_YES);
-
-
-    m_s63chartPanelWinTop->Refresh();
+    if( m_s63chartPanelWinTop ) m_s63chartPanelWinTop->Refresh();
     wxYield();
 
     wxStopWatch sw_import;
@@ -1189,11 +1248,11 @@ int s63_pi::ImportCells( void )
     }
 #endif
 
-    m_buttonImportCells->Disable();
-    m_buttonImportPermit->Disable();
+    if( m_buttonImportCells )  m_buttonImportCells->Disable();
+    if( m_buttonImportPermit ) m_buttonImportPermit->Disable();
 
     for(unsigned int iloop=0 ; iloop < unique_cellname_array.Count() ; iloop++){
-        m_s63chartPanelWin->Refresh();
+        if( m_s63chartPanelWin ) m_s63chartPanelWin->Refresh();
         //  Preclude trying to render S63 charts while the cell import process is underway
         //  by setting recursion counter
         s_PI_bInS57 ++;
@@ -1740,8 +1799,8 @@ finish:
     else
         ScreenLogMessage(_T("Finished Cell Update,  ERRORS encountered\n"));
 
-    m_buttonImportCells->Enable();
-    m_buttonImportPermit->Enable();
+    if( m_buttonImportCells )  m_buttonImportCells->Enable();
+    if( m_buttonImportPermit ) m_buttonImportPermit->Enable();
 
     wxString mm;
     mm = _T("Total import time: ");
@@ -1766,9 +1825,12 @@ finish:
 
 void s63_pi::Set_FPR()
 {
+    if( !m_fpr_text )           // native options page not built (API-only use)
+        return;
+
     if(g_fpr_file.Length()){
         m_fpr_text->SetLabel(g_fpr_file);
-        m_buttonNewFPR->Disable();
+        if( m_buttonNewFPR ) m_buttonNewFPR->Disable();
     }
     else
         m_fpr_text->SetLabel(_T(" "));
@@ -1778,16 +1840,22 @@ void s63_pi::Set_FPR()
 int s63_pi::ImportCert(void)
 {
 
-    //  Get the Certificate (actually the .PUB key file) file from a dialog
+    //  Get the Certificate (actually the .PUB key file) file. When driven by
+    //  DpS63API the path is supplied directly; otherwise pop a file dialog.
     wxString key_file_name;
-    wxFileDialog *openDialog = new wxFileDialog( NULL, _("Select Public Key File"),
-                                                 m_SelectPermit_dir, wxT(""),
-                                                 _("PUB files (*.PUB)|*.PUB|txt files (*.txt)|*.txt|All files (*.*)|*.*"), wxFD_OPEN );
-    int response = openDialog->ShowModal();
-    if( response == wxID_OK )
-        key_file_name = openDialog->GetPath();
-    else
-        return 0;                       // cancelled
+    if( !m_apiCertFileOverride.IsEmpty() ){
+        key_file_name = m_apiCertFileOverride;
+    }
+    else {
+        wxFileDialog *openDialog = new wxFileDialog( NULL, _("Select Public Key File"),
+                                                     m_SelectPermit_dir, wxT(""),
+                                                     _("PUB files (*.PUB)|*.PUB|txt files (*.txt)|*.txt|All files (*.*)|*.*"), wxFD_OPEN );
+        int response = openDialog->ShowModal();
+        if( response == wxID_OK )
+            key_file_name = openDialog->GetPath();
+        else
+            return 0;                       // cancelled
+    }
 
     wxFileName fn(key_file_name);
 
@@ -1827,7 +1895,8 @@ int s63_pi::ImportCert(void)
     OCPNMessageBox_PlugIn(GetOCPNCanvasWindow(), msg,
                              _("s63_pi Message"),  wxOK, -1, -1);
 
-    m_cert_list->BuildList( GetCertificateDir() );
+    if( m_cert_list )
+        m_cert_list->BuildList( GetCertificateDir() );
 
     return 0;
 
@@ -1857,16 +1926,22 @@ int s63_pi::ImportCellPermits(void)
     }
 
 
-    //  Get the PERMIT.TXT file from a dialog
+    //  Get the PERMIT.TXT file. When driven by DpS63API the path is supplied
+    //  directly; otherwise pop a file dialog.
     wxString permit_file_name;
-    wxFileDialog *openDialog = new wxFileDialog( NULL, _("Select PERMIT.TXT File"),
-                                                 m_SelectPermit_dir, wxT(""),
-                                    _("TXT files (*.TXT)|*.TXT|All files (*.*)|*.*"), wxFD_OPEN );
-    int response = openDialog->ShowModal();
-    if( response == wxID_OK )
-        permit_file_name = openDialog->GetPath();
-    else if( response == wxID_CANCEL )
-        return 0;
+    if( !m_apiPermitFileOverride.IsEmpty() ){
+        permit_file_name = m_apiPermitFileOverride;
+    }
+    else {
+        wxFileDialog *openDialog = new wxFileDialog( NULL, _("Select PERMIT.TXT File"),
+                                                     m_SelectPermit_dir, wxT(""),
+                                        _("TXT files (*.TXT)|*.TXT|All files (*.*)|*.*"), wxFD_OPEN );
+        int response = openDialog->ShowModal();
+        if( response == wxID_OK )
+            permit_file_name = openDialog->GetPath();
+        else if( response == wxID_CANCEL )
+            return 0;
+    }
 
 
     wxFileName fn(permit_file_name);
@@ -1945,8 +2020,8 @@ int s63_pi::ImportCellPermits(void)
     }
 
 
-    m_buttonImportCells->Disable();
-    m_buttonImportPermit->Disable();
+    if( m_buttonImportCells )  m_buttonImportCells->Disable();
+    if( m_buttonImportPermit ) m_buttonImportPermit->Disable();
 
     //  If I mean "yes to all", then there should be no confirmation dialogs.
     b_existing_query = !b_yes_to_all;
@@ -1964,7 +2039,7 @@ int s63_pi::ImportCellPermits(void)
             wxString line = permit_file.GetFirstLine();
 
             while( !permit_file.Eof() ){
-                m_s63chartPanelWin->Refresh();
+                if( m_s63chartPanelWin ) m_s63chartPanelWin->Refresh();
                 ::wxYield();
 
                 if(line.StartsWith( _T(":ENC" ) ) ) {
@@ -2006,8 +2081,8 @@ over_loop:
     wxString msg = _T("Cellpermit import complete.\n\n");
     ScreenLogMessage( msg );
 
-    m_buttonImportCells->Enable();
-    m_buttonImportPermit->Enable();
+    if( m_buttonImportCells )  m_buttonImportCells->Enable();
+    if( m_buttonImportPermit ) m_buttonImportPermit->Enable();
 
     //  Set status
 

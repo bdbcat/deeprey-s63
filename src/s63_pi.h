@@ -70,6 +70,10 @@ class   s63_pi;
 class   OCPNPermitList;
 class   OCPNCertificateList;
 
+// Deeprey ecosystem API. Implemented in src/DpS63API.cpp; deeprey-gui consumes
+// the pointer published via SendPluginMessage("S63_API_TO_DP_GUI", ...).
+namespace DpS63 { class DpS63API; }
+
 // An Event handler class to catch events from S63 UI dialog
 class s63_pi_event_handler : public wxEvtHandler
 {
@@ -142,6 +146,11 @@ public:
     int ImportCert( void );
     void Set_FPR();
 
+    // Deeprey integration. The API object exposes S63 chart management to
+    // deeprey-gui; UpdateApiPtr() publishes (or clears) its pointer.
+    friend class DpS63::DpS63API;
+    void UpdateApiPtr();
+
     void EnablePermitRemoveButton(bool benable){ m_buttonRemovePermit->Enable(benable); }
     void GetNewUserpermit(void);
     void GetNewInstallpermit(void);
@@ -150,14 +159,14 @@ public:
 
     wxString GetCertificateDir();
 
-    wxStaticText        *m_up_text;
-    wxStaticText        *m_ip_text;
-    wxStaticText        *m_fpr_text;
+    wxStaticText        *m_up_text = nullptr;
+    wxStaticText        *m_ip_text = nullptr;
+    wxStaticText        *m_fpr_text = nullptr;
 
-    wxScrolledWindow    *m_s63chartPanelWinTop;
-    wxPanel             *m_s63chartPanelWin;
-    wxPanel             *m_s63chartPanelKeys;
-    wxNotebook          *m_s63NB;
+    wxScrolledWindow    *m_s63chartPanelWinTop = nullptr;
+    wxPanel             *m_s63chartPanelWin = nullptr;
+    wxPanel             *m_s63chartPanelKeys = nullptr;
+    wxNotebook          *m_s63NB = nullptr;
 
 private:
     wxString GetPermitDir();
@@ -178,16 +187,16 @@ private:
 
     s63_pi_event_handler *m_event_handler;
 
-    OCPNPermitList      *m_permit_list;
-    wxButton            *m_buttonImportPermit;
-    wxButton            *m_buttonRemovePermit;
-    wxButton            *m_buttonNewUP;
-    wxButton            *m_buttonImportCells;
-    wxButton            *m_buttonNewIP;
-    wxButton            *m_buttonNewFPR;
-    wxCheckBox          *m_cbLog;
+    OCPNPermitList      *m_permit_list = nullptr;
+    wxButton            *m_buttonImportPermit = nullptr;
+    wxButton            *m_buttonRemovePermit = nullptr;
+    wxButton            *m_buttonNewUP = nullptr;
+    wxButton            *m_buttonImportCells = nullptr;
+    wxButton            *m_buttonNewIP = nullptr;
+    wxButton            *m_buttonNewFPR = nullptr;
+    wxCheckBox          *m_cbLog = nullptr;
 
-    wxFileConfig        *m_pconfig;
+    wxFileConfig        *m_pconfig = nullptr;
     wxString            m_SelectPermit_dir;
 
     wxString            m_userpermit;
@@ -195,11 +204,20 @@ private:
     std::vector<Catalog_Entry31 *> m_catalog;
     wxString            m_last_enc_root_dir;
 
-    OCPNCertificateList *m_cert_list;
-    wxButton            *m_buttonImportCert;
+    OCPNCertificateList *m_cert_list = nullptr;
+    wxButton            *m_buttonImportCert = nullptr;
 
-    bool                m_bSSE26_shown;
+    bool                m_bSSE26_shown = false;
     TexFont             m_TexFontMessage;
+
+    DpS63::DpS63API     *m_s63API = nullptr;
+
+    //  Deeprey headless-import overrides: when non-empty, the corresponding
+    //  Import*() routine uses this path instead of popping a file/dir dialog.
+    //  Set/cleared by DpS63API so chart management can run without modal UI.
+    wxString            m_apiPermitFileOverride;
+    wxString            m_apiEncRootOverride;
+    wxString            m_apiCertFileOverride;
 
 
 

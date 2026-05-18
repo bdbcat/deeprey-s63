@@ -1,46 +1,85 @@
 #!/usr/bin/env bash
 
-#
-# Build the OSX artifacts
-#
 
-# bailout on errors and echo commands
-set -xe
-set -o pipefail
+# Build the  MacOS artifacts
 
-#git -C /usr/local/Homebrew/Library/Taps/homebrew/homebrew-core fetch --unshallow
-#git -C /usr/local/Homebrew/Library/Taps/homebrew/homebrew-cask fetch --unshallow
-#brew update-reset
+
+# Copyright (c) 2021 Alec Leamas
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+set -x
+
+# Load local environment if it exists i. e., this is a local build
+if [ -f ~/.config/local-build.rc ]; then source ~/.config/local-build.rc; fi
+
+git submodule update --init opencpn-libs
+
+# If applicable,  restore /usr/local from cache.
+if [[ -n "$CI" && -f /tmp/local.cache.tar ]]; then
+  sudo rm -rf /usr/local/*
+  sudo tar -C /usr -xf /tmp/local.cache.tar
+fi
+
+# Set up build directory
+rm -rf build-osx  && mkdir build-osx
+
+# Create a log file.
+exec > >(tee build-osx/build.log) 2>&1
+
+export MACOSX_DEPLOYMENT_TARGET=10.10
+
+# Return latest version of $1, optionally using option $2
+pkg_version() { brew list --versions $2 $1 | tail -1 | awk '{print $2}'; }
 
 #
 # Check if the cache is with us. If not, re-install brew.
 brew list --versions libexif || brew update-reset
 
-for pkg in cmake libarchive libexif wget;  do
+# Install packaged dependencies
+here=$(cd "$(dirname "$0")"; pwd)
+for pkg in $(sed '/#/d' < $here/../build-deps/macos-deps);  do
     brew list --versions $pkg || brew install $pkg || brew install $pkg || :
     brew link --overwrite $pkg || brew install $pkg
 done
 
+#Install prebuilt dependencies
+wget -q https://dl.cloudsmith.io/public/nohal/opencpn-plugins/raw/files/macos_deps_universal.tar.xz \
+     -O /tmp/macos_deps_universal.tar.xz
+sudo tar -C /usr/local -xJf /tmp/macos_deps_universal.tar.xz
 
-# Install the pre-built wxWidgets package
-#wget -q https://download.opencpn.org/s/rwoCNGzx6G34tbC/download \
-#    -O /tmp/wx312B_opencpn50_macos109.tar.xz
-#tar -C /tmp -xJf /tmp/wx312B_opencpn50_macos109.tar.xz
+export OPENSSL_ROOT_DIR='/usr/local'
 
-wget -q https://download.opencpn.org/s/MCiRiq4fJcKD56r/download \
-    -O /tmp/wx315_opencpn50_macos1010.tar.xz
-tar -C /tmp -xJf /tmp/wx315_opencpn50_macos1010.tar.xz
-
-export PATH="/usr/local/opt/gettext/bin:$PATH"
-echo 'export PATH="/usr/local/opt/gettext/bin:$PATH"' >> ~/.bash_profile
-
-rm -rf build && mkdir build && cd build
-CI_BUILD=ON
-cmake -DOCPN_CI_BUILD=$CI_BUILD \
-  -DOCPN_USE_LIBCPP=ON \
-  -DwxWidgets_CONFIG_EXECUTABLE=/tmp/wx315_opencpn50_macos1010/bin/wx-config \
-  -DwxWidgets_CONFIG_OPTIONS="--prefix=/tmp/wx315_opencpn50_macos1010" \
-  -DCMAKE_INSTALL_PREFIX= "/" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
+# Build and package
+cd build-osx
+cmake \
+  "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release}" \
+  -DCMAKE_INSTALL_PREFIX= \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET} \
+  -DOCPN_TARGET_TUPLE="darwin-wx32;10;universal" \
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
   ..
-make -sj2
-make package
+
+if [[ -z "$CI" ]]; then
+    echo '$CI not found in environment, assuming local setup'
+    echo "Complete build using 'cd build-osx; make tarball' or so."
+    exit 0
+fi
+
+# nor-reproducible error on first invocation, seemingly tarball-conf-stamp
+# is not created as required.
+make VERBOSE=1 tarball || make VERBOSE=1 tarball
+
+# Install cloudsmith needed by upload script
+python3 -m pip install -q --user cloudsmith-cli
+
+# Required by git-push
+python3 -m pip install -q --user cryptography
+
+# Create the cached /usr/local archive
+if [ -n "$CI"  ]; then
+  tar -C /usr -cf /tmp/local.cache.tar  local
+fi
